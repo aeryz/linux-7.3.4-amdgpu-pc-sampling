@@ -21,6 +21,7 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include <linux/bitops.h>
 #include <linux/mutex.h>
 #include <linux/log2.h>
 #include <linux/sched.h>
@@ -45,6 +46,7 @@ struct mm_struct;
 #include "kfd_svm.h"
 #include "kfd_smi_events.h"
 #include "kfd_debug.h"
+#include "kfd_pc_sampling.h"
 
 /*
  * List of struct kfd_process (field kfd_process).
@@ -1200,6 +1202,7 @@ static void kfd_process_destroy_pdds(struct kfd_process *p)
 		if (pdd->ptl_disable_req)
 			kfd_ptl_disable_release(pdd, p);
 
+		kfd_pc_sample_release(pdd);
 		kfd_process_device_destroy_cwsr_dgpu(pdd);
 		kfd_process_device_destroy_ib_mem(pdd);
 
@@ -1645,14 +1648,44 @@ bool kfd_process_xnack_mode(struct kfd_process *p, bool supported)
 	return true;
 }
 
+/* Bits of the first-level TMA flags word (TMA[2]) read by the trap handler */
+enum KFD_TRAP_TYPE_BIT {
+	KFD_TRAP_TYPE_DEBUG = 0,
+	KFD_TRAP_TYPE_HOST,		/* KFD_IOCTL_PCS_METHOD_HOSTTRAP */
+	KFD_TRAP_TYPE_STOCHASTIC,	/* KFD_IOCTL_PCS_METHOD_STOCHASTIC */
+};
+
+/*
+ * Read-modify-write of the flags word. Callers hold the process mutex or are
+ * tearing the process down, so the debug and PC sampling paths cannot race.
+ */
+static void kfd_process_update_trap_flag(struct qcm_process_device *qpd,
+					 unsigned int bit, bool enabled)
+{
+	const size_t off = KFD_CWSR_TMA_OFFSET + 2 * sizeof(uint64_t);
+	uint64_t flags;
+
+	if (iosys_map_is_null(&qpd->cwsr_map))
+		return;
+
+	flags = iosys_map_rd(&qpd->cwsr_map, off, uint64_t);
+	if (enabled)
+		flags |= BIT_ULL(bit);
+	else
+		flags &= ~BIT_ULL(bit);
+	iosys_map_wr(&qpd->cwsr_map, off, uint64_t, flags);
+}
+
 void kfd_process_set_trap_debug_flag(struct qcm_process_device *qpd,
 				     bool enabled)
 {
-	if (!iosys_map_is_null(&qpd->cwsr_map)) {
-		iosys_map_wr(&qpd->cwsr_map,
-			     KFD_CWSR_TMA_OFFSET + 2 * sizeof(uint64_t),
-			     uint64_t, enabled);
-	}
+	kfd_process_update_trap_flag(qpd, KFD_TRAP_TYPE_DEBUG, enabled);
+}
+
+void kfd_process_set_trap_pc_sampling_flag(struct qcm_process_device *qpd,
+			     enum kfd_ioctl_pc_sample_method method, bool enabled)
+{
+	kfd_process_update_trap_flag(qpd, method, enabled);
 }
 
 /*

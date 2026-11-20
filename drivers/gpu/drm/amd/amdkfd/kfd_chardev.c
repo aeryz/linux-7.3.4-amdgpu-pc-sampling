@@ -46,6 +46,7 @@
 #include "kfd_smi_events.h"
 #include "amdgpu_dma_buf.h"
 #include "kfd_debug.h"
+#include "kfd_pc_sampling.h"
 #include "amdgpu_ptl.h"
 
 static long kfd_ioctl(struct file *, unsigned int, unsigned long);
@@ -2986,26 +2987,9 @@ static int runtime_enable(struct kfd_process *p, uint64_t r_debug,
 
 	p->runtime_info.runtime_state = DEBUG_RUNTIME_STATE_ENABLED;
 	p->runtime_info.r_debug = r_debug;
-	p->runtime_info.ttmp_setup = enable_ttmp_setup;
 
-	if (p->runtime_info.ttmp_setup) {
-		for (i = 0; i < p->n_pdds; i++) {
-			struct kfd_process_device *pdd = p->pdds[i];
-
-			if (!kfd_dbg_is_rlc_restore_supported(pdd->dev)) {
-				amdgpu_gfx_off_ctrl(pdd->dev->adev, false);
-				pdd->dev->kfd2kgd->enable_debug_trap(
-						pdd->dev->adev,
-						true,
-						pdd->dev->vm_info.last_vmid_kfd);
-			} else if (kfd_dbg_is_per_vmid_supported(pdd->dev)) {
-				pdd->spi_dbg_override = pdd->dev->kfd2kgd->enable_debug_trap(
-						pdd->dev->adev,
-						false,
-						0);
-			}
-		}
-	}
+	if (enable_ttmp_setup)
+		kfd_dbg_enable_ttmp_setup(p);
 
 retry:
 	if (p->debug_trap_enabled) {
@@ -3188,6 +3172,11 @@ static int kfd_ioctl_set_debug_trap(struct file *filep, struct kfd_process *p, v
 		goto out;
 
 	mutex_lock(&target->mutex);
+	if (!!target->pc_sampling_ref) {
+		pr_debug("Cannot enable debug trap on PID:%d because PC Sampling active\n", args->pid);
+		r = -EBUSY;
+		goto unlock_out;
+	}
 
 	if (args->op != KFD_IOC_DBG_TRAP_ENABLE && !target->debug_trap_enabled) {
 		pr_err("PID %i not debug enabled for op %i\n", args->pid, args->op);
@@ -3486,6 +3475,34 @@ static int kfd_ioctl_profiler(struct file *filep, struct kfd_process *p, void *d
 	return -EINVAL;
 }
 
+static int kfd_ioctl_pc_sample(struct file *filep,
+			       struct kfd_process *p, void *data)
+{
+	struct kfd_ioctl_pc_sample_args *args = data;
+	struct kfd_process_device *pdd;
+	int ret = 0;
+
+	if (sched_policy == KFD_SCHED_POLICY_NO_HWS)
+		return -EINVAL;
+
+	mutex_lock(&p->mutex);
+	pdd = kfd_process_device_data_by_id(p, args->gpu_id);
+
+	if (!pdd) {
+		ret = -EINVAL;
+	} else if (args->op == KFD_IOCTL_PCS_OP_START) {
+		pdd = kfd_bind_process_to_device(pdd->dev, p);
+		if (IS_ERR(pdd))
+			ret = -ESRCH;
+	}
+
+	if (!ret)
+		ret = kfd_pc_sample(pdd, args);
+	mutex_unlock(&p->mutex);
+
+	return ret;
+}
+
 #define AMDKFD_IOCTL_DEF(ioctl, _func, _flags) \
 	[_IOC_NR(ioctl)] = {.cmd = ioctl, .func = _func, .flags = _flags, \
 			    .validate = NULL, .cmd_drv = 0, .name = #ioctl}
@@ -3615,6 +3632,9 @@ static const struct amdkfd_ioctl_desc amdkfd_ioctls[] = {
 
 	AMDKFD_IOCTL_DEF(AMDKFD_IOC_PROFILER,
 			kfd_ioctl_profiler, 0),
+
+	AMDKFD_IOCTL_DEF(AMDKFD_IOC_PC_SAMPLE,
+			kfd_ioctl_pc_sample, 0),
 };
 
 #define AMDKFD_CORE_IOCTL_COUNT	ARRAY_SIZE(amdkfd_ioctls)
@@ -3636,7 +3656,8 @@ static long kfd_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
 		goto err_i1;
 	}
 
-	if ((nr >= AMDKFD_COMMAND_START) && (nr < AMDKFD_COMMAND_END)) {
+	if (((nr >= AMDKFD_COMMAND_START) && (nr < AMDKFD_COMMAND_END)) ||
+	    ((nr >= AMDKFD_COMMAND_START_2) && (nr < AMDKFD_COMMAND_END_2))) {
 		u32 amdkfd_size;
 
 		ioctl = &amdkfd_ioctls[nr];
