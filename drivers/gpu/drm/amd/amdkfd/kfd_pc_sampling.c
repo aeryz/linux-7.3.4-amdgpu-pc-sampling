@@ -296,6 +296,61 @@ static int kfd_pc_sample_query_cap(struct kfd_process_device *pdd,
 	return 0;
 }
 
+/*
+ * A sample carries its dispatch index, workgroup ID and wave ID only if SPI
+ * filled the wave's TTMPs at launch, which it does only while
+ * SPI_GDBG_PER_VMID_CNTL.TRAP_EN is set for the wave's VMID. The driver sets
+ * it at init and KFD asks MES to keep it, but GC 11.5 MES keeps clearing it:
+ * it was found cleared before about a quarter of 1 ms host traps, and
+ * stochastic samples got no initialized TTMPs at all. While sampling, put it
+ * back for all KFD VMIDs every millisecond.
+ */
+static void kfd_pc_sampling_trap_en_work(struct work_struct *work)
+{
+	struct kfd_node *node = container_of(to_delayed_work(work), struct kfd_node,
+					     pcs_data.trap_en_work);
+	bool restored = false;
+	uint32_t vmid, inst;
+
+	for (vmid = node->vm_info.first_vmid_kfd; vmid <= node->vm_info.last_vmid_kfd; vmid++)
+		for_each_inst(inst, node->xcc_mask)
+			restored |= node->kfd2kgd->ensure_vmid_trap_en(node->adev, vmid, inst);
+
+	node->pcs_data.trap_en_runs++;
+	node->pcs_data.trap_en_restored += restored;
+	schedule_delayed_work(&node->pcs_data.trap_en_work, msecs_to_jiffies(1));
+}
+
+/*
+ * Start or stop the TRAP_EN work with the first or last started session on
+ * the node. GFXOFF stays off meanwhile: the work and the host-trap thread
+ * access GC registers from the CPU. Caller holds pcs_data.mutex.
+ */
+static void kfd_pc_sampling_update_active(struct kfd_node *node)
+{
+	struct kfd_dev_pc_sampling *pcs = &node->pcs_data;
+	bool want = pcs->hosttrap_entry.base.active_count || pcs->stoch_entry.base.active_count;
+
+	lockdep_assert_held(&pcs->mutex);
+
+	if (!node->kfd2kgd->ensure_vmid_trap_en || want == pcs->active)
+		return;
+
+	pcs->active = want;
+	if (want) {
+		amdgpu_gfx_off_ctrl(node->adev, false);
+		pcs->trap_en_runs = 0;
+		pcs->trap_en_restored = 0;
+		schedule_delayed_work(&pcs->trap_en_work, 0);
+		return;
+	}
+
+	cancel_delayed_work_sync(&pcs->trap_en_work);
+	dev_dbg(node->adev->dev, "PC sampling: TRAP_EN found cleared in %u of %u checks\n",
+		pcs->trap_en_restored, pcs->trap_en_runs);
+	amdgpu_gfx_off_ctrl(node->adev, true);
+}
+
 static int kfd_pc_sample_start(struct kfd_process_device *pdd,
 			       struct pc_sampling_entry *pcs_entry)
 {
@@ -319,6 +374,7 @@ static int kfd_pc_sample_start(struct kfd_process_device *pdd,
 
 		pdd->dev->pcs_data.stoch_entry.base.active_count++;
 	}
+	kfd_pc_sampling_update_active(pdd->dev);
 	mutex_unlock(&pdd->dev->pcs_data.mutex);
 
 	while (pc_sampling_start) {
@@ -356,6 +412,7 @@ static int kfd_pc_sample_start(struct kfd_process_device *pdd,
 		} else {
 			pdd->dev->pcs_data.stoch_entry.base.active_count--;
 		}
+		kfd_pc_sampling_update_active(pdd->dev);
 		mutex_unlock(&pdd->dev->pcs_data.mutex);
 		kfd_process_set_trap_pc_sampling_flag(&pdd->qpd,
 						      pcs_entry->method, false);
@@ -407,6 +464,10 @@ static int kfd_pc_sample_stop(struct kfd_process_device *pdd,
 						0, inst);
 		}
 	}
+
+	mutex_lock(&pdd->dev->pcs_data.mutex);
+	kfd_pc_sampling_update_active(pdd->dev);
+	mutex_unlock(&pdd->dev->pcs_data.mutex);
 
 	return 0;
 }
@@ -545,9 +606,8 @@ static int kfd_pc_sample_destroy(struct kfd_process_device *pdd, uint32_t trace_
  * when it is signalled), so the thread must not outlive its node: the thread
  * dereferences the node and runs code that lives in this module, and neither
  * the node memory nor the module can be released while it is still running.
- * kfd_cleanup_nodes() calls this for every node before tearing the node down.
  */
-void kfd_pc_sample_stop_thread(struct kfd_node *node)
+static void kfd_pc_sample_stop_thread(struct kfd_node *node)
 {
 	struct task_struct *thread;
 
@@ -564,6 +624,18 @@ void kfd_pc_sample_stop_thread(struct kfd_node *node)
 
 	kthread_stop(thread);
 	pr_debug("kfd: stopped PC sampling thread for node %d\n", node->node_id);
+}
+
+void kfd_pc_sample_init_node(struct kfd_node *node)
+{
+	INIT_DELAYED_WORK(&node->pcs_data.trap_en_work, kfd_pc_sampling_trap_en_work);
+}
+
+/* Called by kfd_cleanup_nodes() for every node before tearing it down. */
+void kfd_pc_sample_fini_node(struct kfd_node *node)
+{
+	kfd_pc_sample_stop_thread(node);
+	cancel_delayed_work_sync(&node->pcs_data.trap_en_work);
 }
 
 void kfd_pc_sample_release(struct kfd_process_device *pdd)

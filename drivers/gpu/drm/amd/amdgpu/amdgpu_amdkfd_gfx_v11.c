@@ -1041,6 +1041,30 @@ static uint32_t kgd_gfx_v11_setup_stoch_sampling(struct amdgpu_device *adev,
 	return 0;
 }
 
+/*
+ * SPI writes the trap temporaries (dispatch index, workgroup ID, wave in
+ * group) at wave launch only while SPI_GDBG_PER_VMID_CNTL.TRAP_EN is set for
+ * the wave's VMID. On GC 11.5 MES keeps clearing it despite the
+ * SET_SHADER_DEBUGGER trap enable, so set it again if needed. Returns true if
+ * it had been cleared.
+ */
+static bool kgd_gfx_v11_ensure_vmid_trap_en(struct amdgpu_device *adev,
+					    uint32_t vmid, uint32_t inst)
+{
+	uint32_t data;
+	bool cleared;
+
+	lock_srbm(adev, 0, 0, 0, vmid);
+	data = RREG32_SOC15(GC, GET_INST(GC, inst), regSPI_GDBG_PER_VMID_CNTL);
+	cleared = !REG_GET_FIELD(data, SPI_GDBG_PER_VMID_CNTL, TRAP_EN);
+	if (cleared)
+		WREG32_SOC15(GC, GET_INST(GC, inst), regSPI_GDBG_PER_VMID_CNTL,
+			     REG_SET_FIELD(data, SPI_GDBG_PER_VMID_CNTL, TRAP_EN, 1));
+	unlock_srbm(adev);
+
+	return cleared;
+}
+
 const struct kfd2kgd_calls gfx_v11_kfd2kgd = {
 	.program_sh_mem_settings = program_sh_mem_settings_v11,
 	.set_pasid_vmid_mapping = set_pasid_vmid_mapping_v11,
@@ -1069,5 +1093,6 @@ const struct kfd2kgd_calls gfx_v11_kfd2kgd = {
 	.get_cu_occupancy = kgd_gfx_v11_get_cu_occupancy,
 	.hqd_sdma_get_doorbell = kgd_gfx_v11_hqd_sdma_get_doorbell,
 	.trigger_pc_sample_trap = kgd_gfx_v11_trigger_pc_sample_trap,
-	.setup_stoch_sampling = kgd_gfx_v11_setup_stoch_sampling
+	.setup_stoch_sampling = kgd_gfx_v11_setup_stoch_sampling,
+	.ensure_vmid_trap_en = kgd_gfx_v11_ensure_vmid_trap_en
 };

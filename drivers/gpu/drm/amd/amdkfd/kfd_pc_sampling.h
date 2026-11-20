@@ -11,6 +11,7 @@
 int kfd_pc_sample(struct kfd_process_device *pdd,
 		  struct kfd_ioctl_pc_sample_args *args);
 void kfd_pc_sample_release(struct kfd_process_device *pdd);
-void kfd_pc_sample_stop_thread(struct kfd_node *node);
+void kfd_pc_sample_init_node(struct kfd_node *node);
+void kfd_pc_sample_fini_node(struct kfd_node *node);
 
 #endif /* KFD_PC_SAMPLING_H_ */

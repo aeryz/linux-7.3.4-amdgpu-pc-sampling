@@ -302,6 +302,10 @@ struct kfd_dev_pc_sampling {
 	struct idr sampling_idr;
 	struct kfd_dev_pcs_hosttrap hosttrap_entry;
 	struct kfd_dev_stochastic stoch_entry;
+	struct delayed_work trap_en_work;	/* re-asserts SPI TRAP_EN while active */
+	uint32_t trap_en_runs;
+	uint32_t trap_en_restored;	/* runs that found TRAP_EN cleared */
+	bool active;			/* a session is started; GFXOFF held off */
 };
 
 struct kfd_node {

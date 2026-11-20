@@ -408,6 +408,8 @@ struct kfd2kgd_calls {
 			enum kfd_ioctl_pc_sample_type type,
 			uint64_t intval,
 			uint32_t inst);
+	bool (*ensure_vmid_trap_en)(struct amdgpu_device *adev, uint32_t vmid,
+			uint32_t inst);
 };
 
 #endif	/* KGD_KFD_INTERFACE_H_INCLUDED */

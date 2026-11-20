@@ -622,15 +622,17 @@ static void kfd_pc_sampling_init(struct kfd_node *dev)
 {
 	mutex_init(&dev->pcs_data.mutex);
 	idr_init_base(&dev->pcs_data.sampling_idr, 1);
+	kfd_pc_sample_init_node(dev);
 }
 
 static void kfd_pc_sampling_exit(struct kfd_node *dev)
 {
 	/*
-	 * The PC sampling kthread keeps running until it is explicitly stopped
-	 * and it dereferences this node, so stop it before the node is freed.
+	 * The PC sampling kthread and work keep running until explicitly
+	 * stopped and they dereference this node, so stop them before the node
+	 * is freed.
 	 */
-	kfd_pc_sample_stop_thread(dev);
+	kfd_pc_sample_fini_node(dev);
 	idr_destroy(&dev->pcs_data.sampling_idr);
 	mutex_destroy(&dev->pcs_data.mutex);
 }
