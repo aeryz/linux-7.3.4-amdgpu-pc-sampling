@@ -21,8 +21,9 @@ enables it on gfx1150, and works around a firmware behavior that broke dispatch 
 
 ## Contents
 
-Only `drivers/gpu/drm/amd/` and `include/uapi/linux/kfd_ioctl.h`, at their kernel-tree paths, so
-`git diff f27a3b8 HEAD` is a patch for a full Linux 7.3.4 tree (`patch -p1`).
+Besides this README, only `drivers/gpu/drm/amd/` and `include/uapi/linux/kfd_ioctl.h`, at their
+kernel-tree paths, so `git diff f27a3b8 HEAD -- drivers include` is a patch for a full Linux 7.3.4
+tree (`patch -p1`).
 
 | Commit | Change |
 |---|---|
@@ -38,7 +39,7 @@ was tested):
 
 ```bash
 cd linux-7.3.4                                  # full source tree of the running kernel
-git -C /path/to/linux-7.3.4-amdgpu-pc-sampling diff f27a3b8 HEAD | patch -p1
+git -C /path/to/linux-7.3.4-amdgpu-pc-sampling diff f27a3b8 HEAD -- drivers include | patch -p1
 cp /lib/modules/$(uname -r)/build/.config /lib/modules/$(uname -r)/build/Module.symvers .
 make olddefconfig                               # must leave .config unchanged
 make modules_prepare
